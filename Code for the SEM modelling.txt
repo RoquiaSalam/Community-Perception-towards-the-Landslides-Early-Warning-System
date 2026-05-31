@@ -1,0 +1,542 @@
+############################################################
+## Hybrid SEM for community perception of Landslide EWS
+
+############################################################
+#Libraries
+############################################################
+library(dplyr)
+library(lavaan)
+library(semTools)
+library(readr)
+library(tidyr)
+library(ggplot2)
+library(tibble)
+library(readxl)
+library(janitor)
+
+#Import data + standardize column names
+############################################################
+Data <- read_excel("...............................................")
+
+# Clean column names to snake_case (removes spaces, punctuation)
+dat <- clean_names(Data)
+
+# Quick check (optional)
+dim(dat)
+
+#Drop the blank rows
+'[dat <- dat %>%
+  slice(1:396)]'
+
+#names(dat)[1:70]
+
+############################################################
+## 1) PERF indicators are binary (0/1) -> ordered factors
+############################################################
+dat <- dat %>%
+  mutate(
+    effective  = factor(is_the_present_mode_of_ew_effective,
+                        levels = c(0, 1), ordered = TRUE),
+    timely     = factor(is_ew_timely_disseminated,
+                        levels = c(0, 1), ordered = TRUE),
+    understand = factor(do_you_understand_what_to_do_after_getting_ew,
+                        levels = c(0, 1), ordered = TRUE)
+  )
+
+############################################################
+## 2) Covariates handling + inputs used in indices
+############################################################
+
+# Gender and ethnicity are 1/2 binaries (nominal) -> recode to 0/1 dummies
+# Here: category "2" becomes 1, category "1" becomes 0.
+dat <- dat %>%
+  mutate(
+    gender01    = ifelse(gender == 2, 1, ifelse(gender == 1, 0, NA)),
+    ethnicity01 = ifelse(ethnicity == 2, 1, ifelse(ethnicity == 1, 0, NA))
+  )
+
+# Numeric covariates 
+dat <- dat %>%
+  mutate(
+    age           = as.numeric(age),
+    family_member = as.numeric(family_member),
+    education     = as.numeric(education)
+    #occupation    = as.numeric(occupation)
+  )
+
+# Pillar item inputs that are ORDINAL
+dat <- dat %>%
+  mutate(
+    house_type                       = as.ordered(house_type),
+    location_of_the_house            = as.ordered(location_of_the_house),
+    level_of_landslide_risk          = as.ordered(level_of_landslide_risk),
+    landslide_frequency_in_the_area  = as.ordered(landslide_frequency_in_the_area),
+    #perceived_vulnerability_level    = as.ordered(perceived_vulnerability_level),
+    how_reliable_is_the_current_ew   = as.ordered(how_reliable_is_the_current_ew),
+    how_early_should_the_ew_be       = as.ordered(how_early_should_the_ew_be)
+  )
+
+# Binary (0/1) items used in indices -> keep numeric
+dat <- dat %>%
+  mutate(
+    is_there_drainage_system =
+      as.numeric(is_there_drainage_system),
+    does_the_current_ew_mention_the_potential_impacts =
+      as.numeric(does_the_current_ew_mention_the_potential_impacts),
+    do_you_receive_early_forecasting_warning =
+      as.numeric(do_you_receive_early_forecasting_warning)
+  )
+
+############################################################
+## 3) Build formative checklist composites (count indices)
+############################################################
+sign_cols      <- names(dat)[grepl("^sign_of_landslides_", names(dat))]
+cause_cols     <- names(dat)[grepl("^cause_of_landslides_", names(dat))]
+impact_cols    <- names(dat)[grepl("^impact_", names(dat))]
+
+warn_from_cols <- names(dat)[grepl("^warning_received_from_", names(dat))]
+warn_chan_cols <- names(dat)[grepl("^channel_of_warning_", names(dat))]
+pref_chan_cols <- names(dat)[grepl("^preferred_channels_of_receiving_ew_", names(dat))]
+
+taken_cols     <- names(dat)[grepl("^taken_measures_", names(dat))]
+response_cols  <- names(dat)[grepl("^response_activity_", names(dat))]
+
+
+
+####################################
+
+# combine all checklist columns
+all_check_cols <- c(sign_cols, cause_cols, impact_cols,
+                    warn_from_cols, warn_chan_cols, pref_chan_cols,
+                    taken_cols, response_cols)
+
+# keep only existing
+all_check_cols <- all_check_cols[all_check_cols %in% names(dat)]
+
+# check type + values
+check_binary01 <- function(x){
+  vals <- sort(unique(x))
+  vals <- vals[!is.na(vals)]
+  list(class = class(x)[1],
+       ok = all(vals %in% c(0,1)),
+       unique = vals)
+}
+
+# inspect a few (or all)
+res <- lapply(dat[all_check_cols], check_binary01)
+table(sapply(res, `[[`, "ok"))      # how many pass
+table(sapply(res, `[[`, "class"))   # what classes
+
+all_check_cols <- c(sign_cols, cause_cols, impact_cols,
+                    warn_from_cols, warn_chan_cols, pref_chan_cols,
+                    taken_cols, response_cols)
+all_check_cols <- all_check_cols[all_check_cols %in% names(dat)]
+
+# rows that contain any value > 1 in checklist items (likely totals row)
+bad_rows <- dat %>%
+  mutate(.bad = rowSums(across(all_of(all_check_cols), ~ .x > 1), na.rm = TRUE)) %>%
+  filter(.bad > 0)
+
+bad_rows %>% select(.bad, all_of(all_check_cols)) %>% head()
+
+#Drop the rows
+dat <- dat %>%
+  filter(if_all(all_of(all_check_cols), ~ .x %in% c(0, 1)))
+#recheck
+check01 <- function(x){
+  u <- sort(unique(x)); u <- u[!is.na(u)]
+  all(u %in% c(0,1))
+}
+stopifnot(!anyNA(dat[all_check_cols]))
+
+#############################################################
+
+dat <- dat %>%
+  mutate(
+    sign_count      = rowSums(across(all_of(sign_cols)), na.rm = TRUE),
+    cause_count     = rowSums(across(all_of(cause_cols)), na.rm = TRUE),
+    impact_count    = rowSums(across(all_of(impact_cols)), na.rm = TRUE),
+    
+    warn_from_count = rowSums(across(all_of(warn_from_cols)), na.rm = TRUE),
+    warn_chan_count = rowSums(across(all_of(warn_chan_cols)), na.rm = TRUE),
+    pref_chan_count = rowSums(across(all_of(pref_chan_cols)), na.rm = TRUE),
+    
+    taken_count     = rowSums(across(all_of(taken_cols)), na.rm = TRUE),
+    response_count  = rowSums(across(all_of(response_cols)), na.rm = TRUE)
+    #recovery_count  = rowSums(across(all_of(recovery_cols)), na.rm = TRUE),
+    #mitig_count     = rowSums(across(all_of(mitig_cols)), na.rm = TRUE)
+  )
+
+########
+#Check the binary columns
+x <- c("is_there_drainage_system",
+       "does_the_current_ew_mention_the_potential_impacts",
+       "do_you_receive_early_forecasting_warning")
+
+x <- x[x %in% names(dat)]
+
+data.frame(
+  col = x,
+  class = sapply(dat[x], function(z) paste(class(z), collapse="/")),
+  uniq = sapply(dat[x], function(z) paste(sort(unique(z)), collapse=", "))
+)
+
+############################################################
+## 4) Build pillar indices (z-scored: components standardized then averaged)
+############################################################
+z_num <- function(x) as.numeric(scale(as.numeric(x)))
+z_ord <- function(x) as.numeric(scale(as.numeric(as.ordered(x))))
+z_bin <- function(x) as.numeric(scale(as.numeric(x)))
+dat <- dat %>%
+  mutate(
+    p1 = rowMeans(cbind(
+      z_ord(house_type),
+      z_ord(location_of_the_house),
+      z_ord(level_of_landslide_risk),
+      z_bin(is_there_drainage_system),
+      z_ord(landslide_frequency_in_the_area),
+      #z_ord(perceived_vulnerability_level),
+      z_num(sign_count),
+      z_num(cause_count),
+      z_num(impact_count)
+    ), na.rm = TRUE),
+    
+    p2 = rowMeans(cbind(
+      z_bin(does_the_current_ew_mention_the_potential_impacts),
+      z_ord(how_reliable_is_the_current_ew)
+    ), na.rm = TRUE),
+    
+    p3_access = rowMeans(cbind(
+      z_bin(do_you_receive_early_forecasting_warning),
+      z_num(warn_from_count),
+      z_num(warn_chan_count),
+      z_num(pref_chan_count),
+      z_ord(how_early_should_the_ew_be)
+    ), na.rm = TRUE),
+    
+    p4 = rowMeans(cbind(
+      z_num(taken_count),
+      z_num(response_count)
+      #z_num(recovery_count),
+      #z_num(mitig_count)
+    ), na.rm = TRUE)
+  )
+
+############################################################
+## 5) CFA screen for PERF + reliability
+############################################################
+cfa_model <- '
+  PERF =~ effective + timely + understand
+'
+
+fit_cfa <- cfa(
+  cfa_model,
+  data = dat,
+  estimator = "WLSMV",
+  ordered = c("effective", "timely", "understand")
+)
+
+summary(fit_cfa, standardized = TRUE, fit.measures = TRUE)
+compRelSEM(fit_cfa)
+AVE(fit_cfa)
+
+############################################################
+## 6) Model 1 and Model 2 (z-scored pillars)
+############################################################
+
+model1 <- '
+  PERF =~ effective + timely + understand
+
+  p2        ~ a*p1
+  p3_access ~ b*p2
+  PERF      ~ c*p3_access
+
+  p4 ~ p1 + p2 + p3_access + PERF +
+       age + family_member + gender01 + education + ethnicity01
+
+  ind_p2_PERF := b*c
+  ind_p1_PERF := a*b*c
+'
+
+fit_model1 <- sem(
+  model1,
+  data = dat,
+  estimator = "WLSMV",
+  ordered = c("effective","timely","understand")
+)
+
+model2 <- '
+  PERF =~ effective + timely + understand
+
+  p2        ~ a*p1
+  p3_access ~ b*p2 + f*p1
+  PERF      ~ c*p3_access + d*p2 + e*p1
+
+  p4 ~ g*p1 + h*p2 + i*p3_access + j*PERF +
+       age + family_member + gender01 + education +  ethnicity01
+
+  ind_p2_PERF_via_access             := b*c
+  ind_p1_PERF_chain                  := a*b*c
+  ind_p1_PERF_via_p2                 := a*d
+  ind_p1_p4_via_p2                   := a*h
+  ind_p1_p4_via_p2_via_access        := a*b*i
+  ind_p1_p4_via_p2_via_access_viaPERF:= a*b*c*j
+  
+
+  total_p2_PERF := d + ind_p2_PERF_via_access
+  total_p1_p4 := g + ind_p1_p4_via_p2 + ind_p1_p4_via_p2_via_access + ind_p1_p4_via_p2_via_access_viaPERF
+'
+
+fit_model2 <- sem(
+  model2,
+  data = dat,
+  estimator = "WLSMV",
+  ordered = c("effective","timely","understand")
+)
+
+############################################################
+## 7) No z-scoring pillar indices for sensitivity (p*_ns)
+############################################################
+dat <- local({
+  ord_num <- function(x) as.numeric(as.ordered(x))
+  num01   <- function(x) as.numeric(x)
+  
+  dat %>%
+    mutate(
+      p1_ns = rowMeans(cbind(
+        ord_num(house_type),
+        ord_num(location_of_the_house),
+        ord_num(level_of_landslide_risk),
+        num01(is_there_drainage_system),
+        ord_num(landslide_frequency_in_the_area),
+        #ord_num(perceived_vulnerability_level),
+        num01(sign_count),
+        num01(cause_count),
+        num01(impact_count)
+      ), na.rm = TRUE),
+      
+      p2_ns = rowMeans(cbind(
+        num01(does_the_current_ew_mention_the_potential_impacts),
+        ord_num(how_reliable_is_the_current_ew)
+      ), na.rm = TRUE),
+      
+      p3_access_ns = rowMeans(cbind(
+        num01(do_you_receive_early_forecasting_warning),
+        num01(warn_from_count),
+        num01(warn_chan_count),
+        num01(pref_chan_count),
+        ord_num(how_early_should_the_ew_be)
+      ), na.rm = TRUE),
+      
+      p4_ns = rowMeans(cbind(
+        num01(taken_count),
+        num01(response_count)
+       # num01(recovery_count),
+       # num01(mitig_count)
+      ), na.rm = TRUE)
+    )
+})
+
+############################################################
+## 8) Model 3 (no z-scoring pillars)
+############################################################
+
+model3 <- '
+  PERF =~ effective + timely + understand
+
+  p2_ns        ~ a_ns*p1_ns
+  p3_access_ns ~ b_ns*p2_ns
+  PERF         ~ c_ns*p3_access_ns
+
+  p4_ns ~ p1_ns + p2_ns + p3_access_ns + PERF +
+          age + family_member + gender01 + education + ethnicity01
+
+  ind_p2_PERF_ns := b_ns*c_ns
+  ind_p1_PERF_ns := a_ns*b_ns*c_ns
+'
+
+fit_model3 <- sem(
+  model3,
+  data = dat,
+  estimator = "WLSMV",
+  ordered = c("effective","timely","understand")
+)
+
+
+
+############################################################
+## 9) Outputs (fit, paths, indirects, R²) for each model
+############################################################
+
+model_outputs <- function(fit, label, csv_name){
+  cat("\n=====================================\n")
+  cat(label, "\n")
+  cat("=====================================\n\n")
+  
+  print(fitMeasures(fit, c("cfi","tli","rmsea","srmr")))
+  
+  paths <- standardizedSolution(fit) %>%
+    filter(op == "~") %>%
+    select(lhs, rhs, est.std, pvalue) %>%
+    arrange(lhs, pvalue)
+  cat("\n--- Standardized paths ---\n")
+  print(paths)
+  
+  pe <- parameterEstimates(fit, standardized = TRUE, ci = TRUE) %>%
+    filter(op %in% c(":=", "~")) %>%
+    select(lhs, op, rhs, est, se, z, pvalue, ci.lower, ci.upper, std.all)
+  cat("\n--- Parameters (paths + defined effects) ---\n")
+  print(pe)
+  
+  r2 <- inspect(fit, "r2")
+  cat("\n--- R-squared ---\n")
+  print(r2)
+  
+  write_csv(pe, csv_name)
+  
+  invisible(list(fit = fitMeasures(fit, c("cfi","tli","rmsea","srmr")),
+                 paths = paths,
+                 pe = pe,
+                 r2 = r2))
+}
+
+out1 <- model_outputs(fit_model1, "Model 1 (z-scored pillars)", "parameter_estimates_model1.csv")
+out2 <- model_outputs(fit_model2, "Model 2 (z-scored + direct paths)", "parameter_estimates_model2.csv")
+out3 <- model_outputs(fit_model3, "Model 3 (no z-scoring pillars)", "parameter_estimates_model3.csv")
+
+
+############################################################
+## 10) ESTIMATOR SENSITIVITY FOR ALL MODELS (1–3)
+##     WLSMV vs DWLS vs ULSMV
+############################################################
+
+models <- list(
+  model1 = model1,
+  model2 = model2,
+  model3 = model3
+)
+
+estimators <- c("WLSMV", "DWLS", "ULSMV")
+
+# Recommended: keep ordered only for categorical INDICATORS / endogenous categorical vars
+# (exogenous ordered covariates often destabilize DWLS/ULSMV)
+#ordered_vars_sens <- c("effective","timely","understand")
+# If you insist on keeping exogenous ordinals ordered, use your original vector instead:
+ ordered_vars_sens <- c("effective","timely","understand")
+
+fit_and_extract <- function(model_syntax, estimator_name, data_use, ordered_use) {
+  
+  fit <- sem(
+    model_syntax,
+    data      = data_use,
+    estimator = estimator_name,
+    ordered   = ordered_use
+  )
+  
+  converged <- lavInspect(fit, "converged")
+  
+  # If not converged, return NA fit indices + empty paths (prevents crash)
+  if (!isTRUE(converged)) {
+    return(list(
+      converged = FALSE,
+      fit   = c(cfi = NA, tli = NA, rmsea = NA, srmr = NA),
+      paths = tibble::tibble()
+    ))
+  }
+  
+  fit_vec <- fitMeasures(fit, c("cfi", "tli", "rmsea", "srmr"))
+  
+  paths_df <- standardizedSolution(fit) %>%
+    filter(op == "~") %>%
+    select(lhs, rhs, est.std, pvalue) %>%
+    arrange(lhs, pvalue)
+  
+  list(
+    converged = TRUE,
+    fit   = fit_vec,
+    paths = paths_df
+  )
+}
+
+run_sens_for_model <- function(model_name, model_syntax, data_use, ordered_use) {
+  
+  res <- lapply(estimators, function(est) {
+    fit_and_extract(model_syntax, est, data_use, ordered_use)
+  })
+  names(res) <- tolower(estimators)
+  
+  cat("\n====================================================\n")
+  cat("ESTIMATOR SENSITIVITY:", model_name, "\n")
+  cat("====================================================\n\n")
+  
+  cat("Fit indices (converged?):\n")
+  print(list(
+    WLSMV = res$wlsmv$converged,
+    DWLS  = res$dwls$converged,
+    ULSMV = res$ulsmv$converged
+  ))
+  print(res$wlsmv$fit); print(res$dwls$fit); print(res$ulsmv$fit)
+  
+  flag_fit <- function(fit_vec, label){
+    if (!is.na(fit_vec["rmsea"]) && fit_vec["rmsea"] > 0.20) {
+      message("NOTE: ", model_name, " | ", label,
+              " has very high RMSEA (", round(fit_vec["rmsea"], 3),
+              "). Treat as estimator instability.")
+    }
+  }
+  flag_fit(res$wlsmv$fit, "WLSMV")
+  flag_fit(res$dwls$fit,  "DWLS")
+  flag_fit(res$ulsmv$fit, "ULSMV")
+  
+  if (isTRUE(res$wlsmv$converged)) {
+    cat("\nStandardized structural paths (WLSMV):\n")
+    print(res$wlsmv$paths)
+  } else cat("\nWLSMV did not converge; paths unavailable.\n")
+  
+  if (isTRUE(res$dwls$converged)) {
+    cat("\nStandardized structural paths (DWLS):\n")
+    print(res$dwls$paths)
+  } else cat("\nDWLS did not converge; paths unavailable.\n")
+  
+  if (isTRUE(res$ulsmv$converged)) {
+    cat("\nStandardized structural paths (ULSMV):\n")
+    print(res$ulsmv$paths)
+  } else cat("\nULSMV did not converge; paths unavailable.\n")
+  
+  invisible(res)
+}
+
+sens_out <- lapply(names(models), function(mn) {
+  run_sens_for_model(mn, models[[mn]], dat, ordered_vars_sens)
+})
+names(sens_out) <- names(models)
+
+# Optional: export sensitivity results
+fit_tbl <- do.call(rbind, lapply(names(sens_out), function(mn) {
+  do.call(rbind, lapply(names(sens_out[[mn]]), function(est_key) {
+    v <- sens_out[[mn]][[est_key]]$fit
+    data.frame(
+      model = mn,
+      estimator = toupper(est_key),
+      converged = sens_out[[mn]][[est_key]]$converged,
+      cfi = as.numeric(v["cfi"]),
+      tli = as.numeric(v["tli"]),
+      rmsea = as.numeric(v["rmsea"]),
+      srmr = as.numeric(v["srmr"])
+    )
+  }))
+}))
+
+write_csv(fit_tbl, "sensitivity_fit_indices_all_models.csv")
+
+paths_tbl <- do.call(rbind, lapply(names(sens_out), function(mn) {
+  do.call(rbind, lapply(names(sens_out[[mn]]), function(est_key) {
+    # If not converged, this will just bind 0 rows
+    sens_out[[mn]][[est_key]]$paths %>%
+      mutate(model = mn, estimator = toupper(est_key)) %>%
+      select(model, estimator, lhs, rhs, est.std, pvalue)
+  }))
+}))
+
+write_csv(paths_tbl, "sensitivity_paths_all_models.csv")
+
